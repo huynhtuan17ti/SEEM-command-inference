@@ -57,7 +57,6 @@ def main():
     colors_list = [(np.array(color['color'])/255).tolist() for color in COCO_CATEGORIES] + [[1, 1, 1]]
 
     # inference main
-
     @torch.no_grad()
     def handle_refimg():
         model.model.task_switch['visual'] = True
@@ -88,6 +87,7 @@ def main():
 
         return outputs_refimg
     
+    # TODO: think about multiple ref images
     with torch.autocast(device_type='cuda', dtype=torch.float16):
         outputs_refimg = handle_refimg()
 
@@ -116,15 +116,19 @@ def main():
         s_emb = results['pred_pvisuals']
         pred_masks = results['pred_masks']
 
+        # v_emb is the output feature of object masks in image
+        # s_emb is the output feature of mask in ref image
+        # TODO: maybe we can use a similarity function instead of simple matrix multiplication below
         pred_logits = v_emb @ s_emb.transpose(1,2)
-        logits_idx_y = pred_logits[:,:,0].max(dim=1)[1]
-        logits_idx_x = torch.arange(len(logits_idx_y), device=logits_idx_y.device)
-        logits_idx = torch.stack([logits_idx_x, logits_idx_y]).tolist()
-        pred_masks_pos = pred_masks[logits_idx]
-        pred_class = results['pred_logits'][logits_idx].max(dim=-1)[1]
+        # apply sigmoid and threshold
+        sigmoid_pred_logits = torch.nn.Sigmoid()(pred_logits[:,:,0])
+        logits_idx_y = (sigmoid_pred_logits > 0.4).nonzero(as_tuple=True)[1]
+        # get mask and class idx
+        pred_masks_pos = pred_masks[:, logits_idx_y]
+        pred_class = results['pred_logits'][:, logits_idx_y].max(dim=-1)[1][0]
 
-        pred_masks_pos = (F.interpolate(pred_masks_pos[None,], image_size[-2:], mode='bilinear')[0,:,:data['height'],:data['width']] > 0.0).float().cpu().numpy()
-        texts = [all_classes[pred_class[0]]]
+        # seems upsize the masks
+        pred_masks_pos = (F.interpolate(pred_masks_pos, image_size[-2:], mode='bilinear')[0,:,:data['height'],:data['width']] > 0.0).float().cpu().numpy()
 
         for idx, mask in enumerate(pred_masks_pos):
             # color = random_color(rgb=True, maximum=1).astype(np.int32).tolist()
@@ -132,7 +136,6 @@ def main():
             demo = visual.draw_binary_mask(mask, color=colors_list[pred_class[0]%133], text=out_txt)
         res = demo.get_image()
         torch.cuda.empty_cache()
-        # return Image.fromarray(res), stroke_inimg, stroke_refimg
         return Image.fromarray(res)
 
     for image_file in os.listdir(image_dir):
